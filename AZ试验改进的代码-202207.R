@@ -15,6 +15,12 @@ library(dplyr)
 library(openxlsx)
 
 ###################
+## 载入环境变量
+###################
+setwd("C:/Users/yli01/OneDrive - lianbio/working/Bayes2StagePP/MthdByAstrazeneca/Git_PP_monitor/ppmonitoringtrial")
+source("environment_values.R")
+
+###################
 ## prior先验设定
 ###################
 
@@ -32,7 +38,7 @@ CalPrior <- function(prop,sd){
 
 PredPower <- function(N, N_I, ns, ni) {
   #	N	:	整个试验的计划样本量
-  #	N_I	:	中期分析时计划的样本量
+  #	N_I	:	当前中期分析（包括PP）时计划的样本量
   #	ns	:	整个试验需要的responders数量
   #	ni	:	中期分析观测到的responders数量
   
@@ -67,8 +73,8 @@ PredPower <- function(N, N_I, ns, ni) {
 ## Compile R function
 #######################
 
-cmp_CalPrior = cmpfun(CalPrior)
-cmp_PredPower = cmpfun(PredPower)
+cmp_CalPrior <- cmpfun(CalPrior)
+cmp_PredPower <- cmpfun(PredPower)
 
 ##################################################
 ## Simulation 试验模拟主体
@@ -94,8 +100,8 @@ cmp_PredPower = cmpfun(PredPower)
 ## Tar: 在Phase c时，最终达成非停决定的response rate
 ## strt: 从该观测后开始监测PP
 ## stop: 从该观测后停止监测PP
+## step: 每几个看一次PP？
 ## PPmon: 继续前进的最低PP要求
-## decision: 决策模式,Dual or Single(futility only)
 ## repsim: 模拟次数
 #================================ 输入参数 ================================
 
@@ -121,10 +127,10 @@ SimTrial <- function(Nt,
                    Tar,
                    strt,
                    stop,
+                   step,
                    PPmon,
-                   decision,
                    repsim,
-                   seed=1234) { 
+                   seed) { 
   
   set.seed(seed)
   
@@ -132,16 +138,30 @@ SimTrial <- function(Nt,
   source_matrix <- matrix(data=NA,nrow=repsim,ncol=Nt)
   
   # 创建决策矩阵:记录决策概率
-  decision_matrix <- matrix(data=NA,nrow=repsim,ncol=Nt)
+  ## 构建指示向量，标记出在哪个人的时候开始做监测（PP以及IA,FA）
+  monitor_index_1 <- seq(from=strt,to=stop,by=step)
+  if (max(monitor_index_1)<stop){
+    monitor_index <- c(monitor_index_1,stop,N_i,Nt)
+  } else {
+    monitor_index <- c(monitor_index_1,N_i,Nt)
+  }
   
-  # 创建决策矩阵:记录决策
-  decision_matrix_decis <- matrix(data=NA,nrow=repsim,ncol=Nt)
+  ## 计算监测过程中，需要看几次（每次PP其实都是一次期中分析）
+  numeber_of_pp <- length(monitor_index)
+  ## 构建决策概率矩阵：行数为模拟次数，列数为 PP次数+2 (一次是IA，一次是FA)
+  decision_matrix <- matrix(data=NA,nrow=repsim,ncol=numeber_of_pp)
+  # 创建决策矩阵:记录决策,1为succ,0为fail
+  decision_matrix_decis <- matrix(data=NA,nrow=repsim,ncol=numeber_of_pp)
   
   #	Response rate的先验分布
   Bpar1 <- c(priora,priorb)
   
+  # 创建模拟数据集
+  ## 创建向量记录beta分布产生的response rate
+  response_rate <- vector(mode = "numeric",length = repsim)
   for (row in 1:repsim){
     theta_1 <- rbeta(1, Bpar1[1] + 1, Bpar1[2] + 1)
+    response_rate[row] <- theta_1
     # 为全人群Nt产生模拟的response
     all.response <- rbinom(Nt, 1, theta_1)
     source_matrix[row,] <- all.response
@@ -151,71 +171,54 @@ SimTrial <- function(Nt,
   # phase A & phase B
   #########################################################################
   
+  # 中期分析时,记录截至第一次PP失败时，有多少样本量
+  ## 初始化向量
+  pp.pass.N <- vector(mode = "numeric",length = repsim)
+  
   for (row in 1:repsim){
-    # 截取前N_i个数据作为Phase C中期分析的依据
+    # 截取模拟数据集中的前N_i个数据作为Phase C中期分析的依据
     all.response.IA <- source_matrix[row,1:N_i]
-    # 数据容器 - 存储PP监测的结果
-    pp.monitor <- vector(mode = "numeric", length = stop - strt + 1)
+    # 数据容器 - 存储PP监测的结果，因为包含了IA和FA，这里要减2
+    pp.monitor <- decision_matrix[row,1:(numeber_of_pp-2)]
     # 数据容器 - 存储PP监测时，患者数量
-    pp.monitor.N <- seq(from=strt,to=stop,by=1)
+    pp.monitor.N <- monitor_index[1:(numeber_of_pp-2)]
     # 数据容器 - 存储PP监测时，步数
-    h <- seq(from=1,to=(stop - strt + 1),by=1)
-    for (g in 1:(stop - strt + 1)) {
+    for (g in 1:(length(pp.monitor))) {
       pp.monitor[g] <-
-        cmp_PredPower(Nt, strt + (g - 1), round(Nt * Tar, 0), max(sum(all.response.IA[1:(strt + (g - 1))])))
+        cmp_PredPower(Nt, pp.monitor.N[g], round(Nt * Tar, 0), max(sum(all.response.IA[1:pp.monitor.N[g]])))
     }
-    # PP计算结果填入决策矩阵
-    decision_matrix[row,strt:stop] <- pp.monitor
-  }
-  
-  # 截取前N_i个数据作为Phase C中期分析的依据 - retire
-  all.response.IA <- all.response[1:N_i]
-  
-  # 数据容器 - 存储PP监测的结果
-  pp.monitor <- vector(mode = "numeric", length = stop - strt + 1)
-  
-  # 数据容器 - 存储PP监测时，患者数量
-  pp.monitor.N <- seq(from=strt,to=stop,by=1)
-  
-  # 数据容器 - 存储PP监测时，步数
-  h <- seq(from=1,to=(stop - strt + 1),by=1)
-  
-  for (g in 1:(stop - strt + 1)) {
-    pp.monitor[g] <-
-      cmp_PredPower(Nt, strt + (g - 1), round(Nt * Tar, 0), max(sum(all.response.IA[1:(strt + (g - 1))])))
-  }
-  
-  # 组装pp.monitor与pp.monitor.N成dataframe: pp.df
-  pp.df <- data.frame(pp.monitor, pp.monitor.N)
-  
-  # pp.df中筛选出小于pp标准的，停止当前招募
-  pp.stop.df <- pp.df %>% filter(pp.monitor<PPmon)
-  
-  # 中期分析时,累积有多少人通过了pp监测
-  pp.pass.N.temp <- ifelse(length(pp.stop.df$pp.monitor.N) == 0, 0, min(pp.stop.df$pp.monitor.N))
-  if (min(pp.df$pp.monitor) >= PPmon){
-    pp.pass.N <- N_i 
-  } else {
-    pp.pass.N <- pp.pass.N.temp
+    # PP计算结果填入决策概率矩阵
+    decision_matrix[row,1:(length(pp.monitor))] <- pp.monitor
+    # 将决策结果填入决策矩阵,TRUE为成功前进,FALSE为失败停止
+    pp.monitor.result <- pp.monitor>=PPmon
+    decision_matrix_decis[row,1:(length(pp.monitor))] <- pp.monitor.result
+    # 如果当前情况第16人成功，第20人失败，则此时实际参与监测的样本量为20
+    if (min(pp.monitor.result)==TRUE){
+      pp.pass.N[row] <- pp.monitor.N[numeber_of_pp-2]
+    } else if (max(pp.monitor.result)==FALSE){
+      pp.pass.N[row] <- pp.monitor.N[1]
+    } else {
+      pp.pass.N[row] <- pp.monitor.N[min(which(pp.monitor.result==FALSE))]
+    }
   }
   
   #########################################################################
   
+  actual_samplesize_vec <- vector(mode = "numeric",length = repsim)
+  
+  for (row in 1:repsim){
+  
   # calculate the REAL number of corresponders among all patients
-  all.response.sum <- sum(all.response)
+  all.response.sum <- sum(source_matrix[row,])
   
   # calculate the REAL number of NON-corresponders among all patients
   all.nonresponse.sum <- Nt - all.response.sum
   
   # calculate the REAL number of corresponders among patients in Interim Analysis
-  all.response.ia.sum <- sum(all.response.IA)
+  all.response.ia.sum <- sum(source_matrix[row,1:N_i])
   
   # calculate the REAL number of NON-corresponders among patients in Interim Analysis
   all.nonresponse.ia.sum <- N_i - all.response.ia.sum
-  
-  #########################################################################
-  
-  # 	Decide
   
   # Final analysis
   ### 1:GO, 2:STOP
@@ -233,50 +236,63 @@ SimTrial <- function(Nt,
   IA_STOP_FLAG <- ifelse(iall.response_stop <= ar_tv, 2,0)
   iall.response_rag <- ifelse(IA_GO_FLAG*IA_STOP_FLAG==0,max(IA_GO_FLAG,IA_STOP_FLAG),2)
   
-  #########################################################################
-  # 	Assemble the results   
+  decision_matrix_decis[row,length(pp.monitor)+1] <- ifelse(iall.response_rag==1,TRUE,FALSE)
+  decision_matrix_decis[row,length(pp.monitor)+2] <- ifelse(all.response_rag==1,TRUE,FALSE)
   
-  ## Interim Analysis
-  #### actual_samp_size: 记录早停时候的样本量
-  #### 情况1:IA之前,pp监测中停止,样本量实际为pp.pass.N
-  #### 情况2:IA之时停止,样本量实际为N_i
-  #### 情况3:不早停，样本量为Nt
-  # actual_samp_size <-
-  #   ifelse(iall.response_rag == 2, ifelse(pp.pass.N < N_i, pp.pass.N, N_i), Nt)
-  actual_samp_size <- pp.pass.N
-  if (actual_samp_size == N_i){
-    if (iall.response_rag != 2){
+  # 考虑进中期分析和FA后，记录决策
+  current_sample_size <- pp.pass.N[row]
+  
+  if (current_sample_size==(N_i-1)){
+    if (iall.response_rag==1){
       actual_samp_size <- Nt
+    } else {
+      actual_samp_size <- N_i
     }
+  } else {
+    actual_samp_size <- current_sample_size
   }
   
-  pre_int1 <- ifelse(pp.pass.N < N_i, "STOP", "GO")
-  p <- true_1
-  ne <- N_p
+  actual_samplesize_vec[row] <- actual_samp_size
   
-  # change flag to char
-  FA_FL <- recode(all.response_rag, `2` = "STOP", `1` = "GO")
-  IA_FL <- recode(iall.response_rag, `2` = "STOP", `1` = "GO")
+  }
   
-  #	Package results
-  tr <-
-    data.frame(
-      ne,
-      p,
-      all.response.sum, # the REAL number of corresponders among all patients
-      all.nonresponse.sum, # the REAL number of NON-corresponders among all patients
-      all.response_go, # boundary for GO at FA
-      all.response_stop, # boundary for STOP at FA
-      FA_FL, # Decision at FA
-      all.response.ia.sum, # the REAL number of corresponders among patients in IA
-      all.nonresponse.ia.sum, # the REAL number of NON-corresponders among patients in IA
-      iall.response_go, # boundary for GO at IA
-      iall.response_stop, # boundary for STOP at IA
-      IA_FL, # Decision at IA
-      pp.pass.N, # the number of patients before NO Continue decision is made
-      pre_int1, # indicate if trial stops before IA
-      actual_samp_size # the sample size when trial stops
-    )
+  #########################################################################
+  # 结果打包输出
   
-  return(tr)
+  result_package <- list(trueP = true_1,
+                         orr = response_rate,
+                         source = as.data.frame(source_matrix),
+                         ppmatrix = as.data.frame(decision_matrix),
+                         decisionmatrix = as.data.frame(decision_matrix_decis),
+                         actualsamplesize = actual_samplesize_vec)
+  
+  return(result_package)
 }
+
+
+# prior
+prior_vec <- cmp_CalPrior(prop=0.52,sd=0.31)
+priora <- prior_vec[1]
+priorb <- prior_vec[2]
+
+sim1 <- SimTrial(Nt,
+                 N_i,
+                 priora,
+                 priorb,
+                 true_1,
+                 tv,
+                 lrv,
+                 dc_lrv,
+                 ar_tv,
+                 Tar,
+                 strt,
+                 stop,
+                 step,
+                 PPmon,
+                 repsim,
+                 seed)
+
+resprate <- sim1$orr
+# Kernel Density Plot
+resprate_d <- density(resprate) # returns the density data
+plot(resprate_d) 
