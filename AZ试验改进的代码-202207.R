@@ -25,11 +25,25 @@ source("environment_values.R")
 ###################
 
 # 先验设定的参考文献: http://dx.doi.org/10.21037/tcr.2019.05.17 
-
+## jack Lee文章中设定为a0=p0,a0+b0反应信息强度，常用a0+b0=1，参考trialdesign.org
 CalPrior <- function(prop,sd){
   a <- ((1-prop)/sd^2-1/prop)*prop^2
   b <- a*(1/prop-1)
   return(c(a,b))
+}
+
+# AZ原文章中的先验设定，允许不明确地设定response rate,适合对p知识缺乏的场景
+AZ_CalPrior <- function(Nt, Prop) {
+  #	Nt	:	Sample size (numeric > 0, REAL)
+  #	Prop 	:	Mean Proportion ( (0,1) )
+  if ((Nt >= 0) & ((Prop >= 0) & (Prop <= 1))) {
+    alpha <- Nt * Prop
+    beta <- Nt * (1-Prop)
+    param <- c(alpha, beta)
+  }
+  else
+    param <- NA
+  return(param)
 }
 
 ##################################################
@@ -75,6 +89,7 @@ PredPower <- function(N, N_I, ns, ni) {
 
 cmp_CalPrior <- cmpfun(CalPrior)
 cmp_PredPower <- cmpfun(PredPower)
+cmp_AZ_PredPower <- cmpfun(AZ_CalPrior)
 
 ##################################################
 ## Simulation 试验模拟主体
@@ -117,8 +132,7 @@ cmp_PredPower <- cmpfun(PredPower)
 
 SimTrial <- function(Nt,
                    N_i,
-                   priora,
-                   priorb,
+                   Np,
                    true_1,
                    tv,
                    lrv,
@@ -153,17 +167,17 @@ SimTrial <- function(Nt,
   # 创建决策矩阵:记录决策,1为succ,0为fail
   decision_matrix_decis <- matrix(data=NA,nrow=repsim,ncol=numeber_of_pp)
   
-  #	Response rate的先验分布
-  Bpar1 <- c(priora,priorb)
-  
   # 创建模拟数据集
   ## 创建向量记录beta分布产生的response rate
   response_rate <- vector(mode = "numeric",length = repsim)
   for (row in 1:repsim){
+    #	Sample response rate from prior
+    Bpar1 <- cmp_AZ_PredPower(Np, true_1)
     theta_1 <- rbeta(1, Bpar1[1] + 1, Bpar1[2] + 1)
     response_rate[row] <- theta_1
     # 为全人群Nt产生模拟的response
     all.response <- rbinom(Nt, 1, theta_1)
+    ## all.response <- rbinom(Nt, 1, true_1) #这里使用true_l
     source_matrix[row,] <- all.response
   }
   
@@ -192,7 +206,7 @@ SimTrial <- function(Nt,
     # 将决策结果填入决策矩阵,TRUE为成功前进,FALSE为失败停止
     pp.monitor.result <- pp.monitor>=PPmon
     decision_matrix_decis[row,1:(length(pp.monitor))] <- pp.monitor.result
-    # 如果当前情况第16人成功，第20人失败，则此时实际参与监测的样本量为20
+    # 如果当前情况第16人成功，第20人失败(step=4)，则此时实际参与监测的样本量为20
     if (min(pp.monitor.result)==TRUE){
       pp.pass.N[row] <- pp.monitor.N[numeber_of_pp-2]
     } else if (max(pp.monitor.result)==FALSE){
@@ -242,7 +256,7 @@ SimTrial <- function(Nt,
   # 考虑进中期分析和FA后，记录决策
   current_sample_size <- pp.pass.N[row]
   
-  if (current_sample_size==(N_i-1)){
+  if (current_sample_size<=(N_i-1) & (current_sample_size+step)>=N_i ){
     if (iall.response_rag==1){
       actual_samp_size <- Nt
     } else {
@@ -271,14 +285,13 @@ SimTrial <- function(Nt,
 
 
 # prior
-prior_vec <- cmp_CalPrior(prop=0.52,sd=0.31)
-priora <- prior_vec[1]
-priorb <- prior_vec[2]
+# prior_vec <- cmp_CalPrior(prop=0.52,sd=0.31)
+# priora <- prior_vec[1]
+# priorb <- prior_vec[2]
 
 sim1 <- SimTrial(Nt,
                  N_i,
-                 priora,
-                 priorb,
+                 Np,
                  true_1,
                  tv,
                  lrv,
@@ -292,7 +305,132 @@ sim1 <- SimTrial(Nt,
                  repsim,
                  seed)
 
+#-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+#
+#  以下为程序输出区，基于sim1的结果
+#
+#-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+
+#############################
+# 先验分布图
+#############################
+
 resprate <- sim1$orr
 # Kernel Density Plot
 resprate_d <- density(resprate) # returns the density data
 plot(resprate_d) 
+
+############################################
+# Table 1 
+############################################
+## 所有模拟场景的平均样本量为
+cat("E(N  | 所有模拟试验): ",round(mean(sim1$actualsamplesize),digits = 1))
+
+## 成功的试验所占的比例
+succ_final_where1 <- which(sim1[["actualsamplesize"]]==Nt)
+succ_final1 <- sum(sim1[["decisionmatrix"]][succ_final_where1,ncol(sim1[["decisionmatrix"]])]==TRUE)
+Succ1 <- (succ_final1)/repsim*100
+cat("%Trial reaching a GO decision and success at final: ",round(Succ1,digits = 0))
+
+## 失败的试验（早停或者Final时候宣布无效）所占的比例
+Fail1 <- 100-Succ1
+cat("%Trial reaching a STOP decision or fail at final: ",round(Fail1,digits = 0))
+
+## 失败/早停的所有模拟试验中，平均样本量为
+fail_where1 <- which(sim1[["actualsamplesize"]]<Nt)
+fail_where2 <- which(sim1[["actualsamplesize"]]==Nt)
+fail_where2_1 <- which(sim1[["decisionmatrix"]][fail_where2,ncol(sim1[["decisionmatrix"]])]==FALSE)
+fail_where <- union(fail_where1,fail_where2_1)
+fail_samplesize <- mean(sim1[["actualsamplesize"]][fail_where])
+cat("E(N | 失败或者早停的试验): ", fail_samplesize)
+
+##################################################
+# Table 3 Prob of stopping at various stages
+##################################################
+## 以下提供算法思路
+# 情况1.1: SFB1: stop at final or before (IA+PP),通过实际中止时候的样本量推导
+stop_before_final1 <- sum(sim1[["actualsamplesize"]]<Nt)
+stop_at_final_where1 <- which(sim1[["actualsamplesize"]]==Nt)
+stop_at_final1 <- sum(sim1[["decisionmatrix"]][stop_at_final_where1,ncol(sim1[["decisionmatrix"]])]==FALSE)
+SFB1 <- (stop_before_final1+stop_at_final1)/repsim
+cat("Table3: The prob of stopping at Final or before with IA+PP is: ", SFB1)
+
+# 情况1.2: SFB2: stop at final or before (NOIA,即无正式中期与PP(这里统称IA)，直接FA)
+stop_at_final2 <- sum(sim1[["decisionmatrix"]][,ncol(sim1[["decisionmatrix"]])]==FALSE)
+SFB2 <- (stop_at_final2)/repsim
+cat("Table3: The prob of stopping at Final or before without IA/PP is: ", SFB2)
+
+# 情况2: SFB3: stop pre IA (IA+PP的情况)
+stop_pre_ia1 <- sum(sim1[["actualsamplesize"]]<N_i)
+SFB3 <- (stop_pre_ia1)/repsim
+cat("Table3: The prob of stopping pre IA with IA+PP is: ", SFB3)
+
+################################################################
+# Table 5 Losses Occurring between interim and final analyses
+################################################################
+
+actsampvec <- sim1[["actualsamplesize"]]
+decision_matrix <- sim1[["decisionmatrix"]]
+colsize <- ncol(decision_matrix)
+decision_matrix <- decision_matrix %>%
+  mutate(IA_stop=NA,
+         IA_go=NA,
+         FA_stop=NA,
+         FA_go=NA,
+         consist=NA,
+         inconsist=NA)
+
+
+
+for (row in (1:nrow(decision_matrix))){
+  IA_stop <- ifelse(actsampvec[row]<Nt,TRUE,FALSE)
+  IA_go <- ifelse(actsampvec[row]==Nt,TRUE,FALSE)
+  FA_stop <- !decision_matrix[row,colsize]
+  FA_go <- decision_matrix[row,colsize]
+  
+  consist <- (IA_stop==FA_stop) | (IA_go==FA_go)
+  inconsist <- !consist
+  
+  decision_matrix[row,"IA_stop"] <- IA_stop
+  decision_matrix[row,"IA_go"] <- IA_go
+  decision_matrix[row,"FA_stop"] <- FA_stop
+  decision_matrix[row,"FA_go"] <- FA_go
+  decision_matrix[row,"consist"] <- consist
+  decision_matrix[row,"inconsist"] <- inconsist
+}
+
+#-----------------------------------------------------------------------------------------------------
+# 这一块主要想评估的是，IA与FA不一致带来的损失,比如中期停了，但是FA宣布有效，sponsor要承担这种损失
+#-----------------------------------------------------------------------------------------------------
+
+# 前后一致的决策
+## Both Go
+both_go <- decision_matrix %>% 
+  filter(IA_go==TRUE & FA_go==TRUE) %>% 
+  summarise(result=sum(consist))
+
+## Both Go
+both_stop <- decision_matrix %>% 
+  filter(IA_stop==TRUE & FA_stop==TRUE) %>% 
+  summarise(result=sum(consist))
+
+cat("Consistent decision with GO at both interim and final: ", round(both_go$result/repsim,digits=2))
+cat("Consistent decision with STOP at both interim and final: ", round(both_stop$result/repsim,digits=2))
+
+
+# 前后不一致的决策
+## STOP at interim,GO at final
+incon_1 <- decision_matrix %>% 
+  filter(IA_stop==TRUE & FA_go==TRUE) %>% 
+  summarise(result=sum(inconsist))
+
+## GO at interim,STOP at final
+incon_2 <- decision_matrix %>% 
+  filter(IA_go==TRUE & FA_stop==TRUE) %>% 
+  summarise(result=sum(inconsist))
+
+cat("Inconsistent decision with STOP at interim,GO at final: ", round(incon_1$result/repsim,digits=2))
+cat("Inconsistent decision with GO at interim,STOP at final: ", round(incon_2$result/repsim,digits=2))
+
+
+
