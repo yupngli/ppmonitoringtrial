@@ -10,9 +10,14 @@ library(compiler)
 
 # data handling
 library(dplyr)
+library(tidyverse)
 
 # data output
 library(openxlsx)
+
+# ggplot
+library(ggplot2)
+library(reshape2)
 
 ###################
 ## 载入环境变量
@@ -431,6 +436,80 @@ incon_2 <- decision_matrix %>%
 
 cat("Inconsistent decision with STOP at interim,GO at final: ", round(incon_1$result/repsim,digits=2))
 cat("Inconsistent decision with GO at interim,STOP at final: ", round(incon_2$result/repsim,digits=2))
+
+#-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+# 决策边界图
+#-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+
+responders <- seq(0,Nt,by=1)
+
+# function to calculate posterior probability
+## 注意这里有默认的弱先验
+PostProb <- function(x, boundary,Nt){
+  return(round(pbeta(boundary, 0.2 + x, 0.8 + Nt-x, lower.tail = FALSE),digits = 2))
+}
+
+# create data frame container
+PostProbDF1 <-
+  data.frame(
+    responders = responders,
+    goprob = rep(NA, length(responders)),
+    stopprob = rep(NA, length(responders))
+  )
+
+# retrieve results
+for (index in 1:length(responders)){
+  PostProbDF1[index,"goprob"] <- PostProb(PostProbDF1[index,"responders"],lrv,Nt)
+  PostProbDF1[index,"stopprob"] <- PostProb(PostProbDF1[index,"responders"],tv,Nt)
+}
+
+# reshape data to plot
+PostProbDF1_t <- melt(PostProbDF1,id=c("responders")) %>%
+  spread(variable,value)
+
+PostProbDF1_t_plot <- melt(PostProbDF1,id=c("responders")) 
+
+# find the number of responders for GO decision
+PostProbDF1_t_GO <- PostProbDF1_t %>%
+  dplyr::filter(goprob>=0.8)
+
+PostProbDF1_t_STOP <- PostProbDF1_t %>%
+  dplyr::filter(stopprob <= 0.1)
+
+PostProbDF1_t_decision <- PostProbDF1_t %>%
+  dplyr::filter(goprob>=0.8 & stopprob > 0.1)
+
+min_resp <- PostProbDF1_t_decision[1,"responders"]
+
+cat("The minimum responders for GO is: ", min_resp, "\n")
+
+# Plot
+## goprob曲线与dc_lrv交点对应的x轴坐标，为前进的最小responders
+## stopprob曲线与ar_tv交点对应的x轴坐标，为停止的最大responders
+## 灰色虚线之间的区域为决策互相冲突的区域，由于采用保守策略，go & stop => stop,所以也画成红色停止区域.
+min_resp_go <- PostProbDF1_t_GO[1,"responders"]
+max_resp_stop <- PostProbDF1_t_STOP[nrow(PostProbDF1_t_STOP),"responders"]
+
+CritPlot1 <- ggplot(PostProbDF1_t_plot, aes(x=responders, y=value, group=variable)) +
+  geom_line(aes(linetype=variable),size=1.2,color="black")+
+  geom_hline(yintercept = c(0.1,0.8),linetype=2,size=0.7,color="orange") + 
+  geom_vline(xintercept = c(min_resp_go,max_resp_stop),linetype=3,color="grey",size=0.9) +
+  geom_point(aes(x=min_resp_go,y=0.8),colour="black",size=4,shape=18) +
+  geom_point(aes(x=max_resp_stop,y=0.1),colour="black",size=4,shape=18) +
+  annotate("rect", xmin = min_resp, xmax = Nt, ymin = 0, ymax = 1,alpha = .2,fill = "green") +
+  annotate("rect", xmin = 0, xmax = max_resp_stop, ymin = 0, ymax = 1,alpha = .2,fill = "red") +
+  annotate(geom="text", x=8, y=0.5, label=paste0("红色停止区域\n<=",max_resp_stop),color="black") +
+  annotate(geom="text", x=35, y=0.5, label=paste0("绿色前进区域\n>=",min_resp),color="black") +
+  annotate(geom="text", x=8, y=0.82, label="前进边界:dc_lrv=0.8",color="black",size=3) +
+  annotate(geom="text", x=36, y=0.12, label="停止边界:ar_tv=0.1",color="black",size=3) +
+  # annotate(geom="text", x=min_resp_go+4, y=0.8-0.03, label=paste0("与前进边界\n交点：",min_resp_go),color="black",size=3) +
+  # annotate(geom="text", x=max_resp_stop+4, y=0.1-0.03, label=paste0("与停止边界\n交点：",max_resp_stop),color="black",size=3) +
+  scale_x_continuous(name="responders", limits=c(0, 50), breaks=seq(0,50,by=2)) +
+  scale_y_continuous(name="posterior prob.", limits=c(0, 1))+
+  theme_classic()
+
+CritPlot1
+
 
 
 
